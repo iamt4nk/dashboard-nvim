@@ -89,6 +89,16 @@ local function load_packages(config)
         .. package_manager_stats.count
         .. ' installed',
     }
+  elseif package_manager_stats.name == 'strive' then
+    lines = {
+      '',
+      'Startuptime: ' .. package_manager_stats.time .. ' ms',
+      'Plugins: '
+        .. package_manager_stats.loaded
+        .. ' loaded / '
+        .. package_manager_stats.count
+        .. ' installed',
+    }
   else
     lines = {
       '',
@@ -128,9 +138,10 @@ local function project_list(config, callback)
     if list then
       list = vim.list_slice(list, #list - config.project.limit)
     end
+    local blank_size = config.shortcuts_left_side and 4 or 3
     for _, dir in ipairs(list or {}) do
       dir = dir:gsub(vim.env.HOME, '~')
-      table.insert(res, (' '):rep(3) .. ' ' .. dir)
+      table.insert(res, (' '):rep(blank_size) .. ' ' .. dir)
     end
 
     if #res == 0 then
@@ -164,7 +175,12 @@ local function mru_list(config)
     icon_hl = 'DashboardMruIcon',
     label = ' Most Recent Files:',
     cwd_only = false,
+    enable = true,
   }, config.mru or {})
+
+  if not config.mru.enable then
+    return {}, {}
+  end
 
   local list = {
     config.mru.icon .. config.mru.label,
@@ -175,17 +191,17 @@ local function mru_list(config)
 
   if config.mru.cwd_only then
     local cwd = uv.cwd()
-    -- get separator from the first file
-    local sep = mlist[1]:match('[\\/]')
-    local cwd_with_sep = cwd:gsub('[\\/]', sep) .. sep
+    -- Normalize both paths to use forward slashes
+    cwd = vim.fn.fnamemodify(cwd, ':p')
     mlist = vim.tbl_filter(function(file)
-      local file_dir = vim.fn.fnamemodify(file, ':p:h')
-      if file_dir and cwd_with_sep then
-        return file_dir:sub(1, #cwd_with_sep) == cwd_with_sep
-      end
+      local file_path = vim.fn.fnamemodify(file, ':p')
+      local file_dir = vim.fn.fnamemodify(file_path, ':h') .. '/'
+      -- Ensure both paths end with separator and are normalized
+      return file_dir:sub(1, #cwd) == cwd
     end, mlist)
   end
 
+  local blank_size = config.shortcuts_left_side and 4 or 3
   for _, file in pairs(vim.list_slice(mlist, 1, config.mru.limit)) do
     local filename = vim.fn.fnamemodify(file, ':t')
     local icon, group = utils.get_icon(filename)
@@ -197,7 +213,7 @@ local function mru_list(config)
     end
     file = icon .. ' ' .. file
     table.insert(groups, { #icon, group })
-    table.insert(list, (' '):rep(3) .. file)
+    table.insert(list, (' '):rep(blank_size) .. file)
   end
 
   if #list == 1 then
@@ -214,54 +230,56 @@ local function shuffle_table(table)
 end
 
 local function letter_hotkey(config)
-  -- Reserve j, k keys to move up and down.
-  local list = { 106, 107 }
+  local used_keys = {}
   local shuffle = config.shuffle_letter
+  local letter_list = config.letter_list
 
   for _, item in pairs(config.shortcut or {}) do
     if item.key then
-      table.insert(list, item.key:byte())
+      table.insert(used_keys, item.key:byte())
     end
+  end
+
+  local confirm_keys = type(config.confirm_key) == 'table' and config.confirm_key
+    or { config.confirm_key }
+  for _, key in ipairs(confirm_keys) do
+    table.insert(used_keys, key:byte())
   end
 
   math.randomseed(os.time())
 
   -- Create key table, fill it with unused characters.
-  local unused_keys = {}
-  -- a - z
-  for key = 97, 122 do
-    if not vim.tbl_contains(list, key) then
-      table.insert(unused_keys, key)
+  local function collect_unused_keys(uppercase)
+    local unused_keys = {}
+    for key in letter_list:gmatch('.') do
+      if uppercase then
+        key = key:upper()
+      end
+      key = key:byte()
+      if not vim.tbl_contains(used_keys, key) then
+        table.insert(unused_keys, key)
+      end
     end
-  end
-
-  if shuffle then
-    shuffle_table(unused_keys)
-  end
-
-  local unused_uppercase_keys = {}
-  -- A - Z
-  for key = 65, 90 do
-    if not vim.tbl_contains(list, key) then
-      table.insert(unused_uppercase_keys, key)
+    if shuffle then
+      shuffle_table(unused_keys)
     end
+    return unused_keys
   end
 
-  if shuffle then
-    shuffle_table(unused_uppercase_keys)
-  end
+  local unused_keys_lowercase = collect_unused_keys(false)
+  local unused_keys_uppercase = collect_unused_keys(true)
 
   -- Push shuffled uppercase keys after the lowercase ones
-  for _, key in pairs(unused_uppercase_keys) do
-    table.insert(unused_keys, key)
+  for _, key in pairs(unused_keys_uppercase) do
+    table.insert(unused_keys_lowercase, key)
   end
 
   local fallback_hotkey = 0
 
   return function()
-    if #unused_keys ~= 0 then
+    if #unused_keys_lowercase ~= 0 then
       -- Pop an unused key to use it as a hotkey.
-      local key = table.remove(unused_keys, 1)
+      local key = table.remove(unused_keys_lowercase, 1)
       return string.char(key)
     else
       -- All keys are already used. Fallback to the number generation.
@@ -352,10 +370,18 @@ local function gen_center(plist, config)
   local first_line = api.nvim_buf_line_count(config.bufnr)
   api.nvim_buf_set_lines(config.bufnr, first_line, -1, false, plist)
 
-  local start_col = plist[plist_len + 2]:find('[^%s]') - 1
+  if not config.project.enable and not config.mru.enable then
+    return
+  end
+
   local _, scol = plist[2]:find('%S')
   if scol == nil then
     scol = 0
+  end
+
+  local start_col = scol
+  if config.mru.enable then
+    start_col = plist[plist_len + 2]:find('[^%s]') - 1
   end
 
   local hotkey = gen_hotkey(config)
@@ -390,10 +416,17 @@ local function gen_center(plist, config)
     local text = api.nvim_buf_get_lines(config.bufnr, first_line + i - 1, first_line + i, false)[1]
     if text and text:find('%w') and not text:find('empty') then
       local key = tostring(hotkey())
-      api.nvim_buf_set_extmark(config.bufnr, ns, first_line + i - 1, 0, {
-        virt_text = { { key, 'DashboardShortCut' } },
-        virt_text_pos = 'eol',
-      })
+      if config.shortcuts_left_side then
+        api.nvim_buf_set_extmark(config.bufnr, ns, first_line + i - 1, start_col - 1, {
+          virt_text = { { key, 'DashboardShortCut' } },
+          virt_text_pos = 'inline',
+        })
+      else
+        api.nvim_buf_set_extmark(config.bufnr, ns, first_line + i - 1, 0, {
+          virt_text = { { key, 'DashboardShortCut' } },
+          virt_text_pos = 'eol',
+        })
+      end
       map_key(config, key, text)
     end
   end
@@ -440,10 +473,17 @@ local function gen_center(plist, config)
     )[1]
     if text and text:find('%w') then
       local key = tostring(hotkey())
-      api.nvim_buf_set_extmark(config.bufnr, ns, first_line + i + plist_len, 0, {
-        virt_text = { { key, 'DashboardShortCut' } },
-        virt_text_pos = 'eol',
-      })
+      if config.shortcuts_left_side then
+        api.nvim_buf_set_extmark(config.bufnr, ns, first_line + i + plist_len, start_col - 1, {
+          virt_text = { { key, 'DashboardShortCut' } },
+          virt_text_pos = 'inline',
+        })
+      else
+        api.nvim_buf_set_extmark(config.bufnr, ns, first_line + i + plist_len, 0, {
+          virt_text = { { key, 'DashboardShortCut' } },
+          virt_text_pos = 'eol',
+        })
+      end
       map_key(config, key, text)
     end
   end
@@ -519,7 +559,11 @@ local function theme_instance(config)
     load_packages(config)
     gen_center(plist, config)
     gen_footer(config)
-    map_key(config, config.confirm_key or '<CR>')
+    local confirm_keys = type(config.confirm_key) == 'table' and config.confirm_key
+      or { config.confirm_key or '<CR>' }
+    for _, key in ipairs(confirm_keys) do
+      map_key(config, key)
+    end
     require('dashboard.events').register_lsp_root(config.path)
     local size = math.floor(vim.o.lines / 2)
       - math.ceil(api.nvim_buf_line_count(config.bufnr) / 2)
